@@ -1,17 +1,14 @@
 from typing import Literal
-from pydantic import BaseModel, Field
+
 from fastapi import APIRouter
 from motor.motor_asyncio import AsyncIOMotorClient
-from common import settings
-from globals import SCRIPT_SYSTEM_PROMPT, CRITIC_PROMPT
-import importlib.util
-from pathlib import Path
+from pydantic import BaseModel, Field
 
-# load Gemini service from api.ts (python content)
-spec = importlib.util.spec_from_file_location("gemini_service", Path(__file__).with_name("api.ts"))
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)  # type: ignore
-GeminiService = module.GeminiService
+from common import settings
+from globals import CRITIC_PROMPT, SCRIPT_SYSTEM_PROMPT
+
+# NOTE: File name is legacy (`api.ts`) but contains Python code.
+from api import GeminiService
 
 router = APIRouter(prefix="/api")
 _client: AsyncIOMotorClient | None = None
@@ -67,30 +64,34 @@ class ScriptRequest(BaseModel):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "creatorpilot-ai"}
 
 
 @router.post("/creator/profile")
 async def save_profile(profile: CreatorProfile):
     db = get_db()
-    await db.creator_profiles.update_one({"creator_id": profile.creator_id}, {"$set": profile.model_dump()}, upsert=True)
-    return {"ok": True}
+    await db.creator_profiles.update_one(
+        {"creator_id": profile.creator_id},
+        {"$set": profile.model_dump()},
+        upsert=True,
+    )
+    return {"ok": True, "creator_id": profile.creator_id}
 
 
 @router.post("/videos")
 async def add_video(video: VideoPerformance):
     db = get_db()
     doc = video.model_dump()
-    doc["engagement_score"] = (doc["likes"] + 2*doc["comments"] + 3*doc["shares"] + 4*doc["follows"]) / max(doc["views"], 1)
-    await db.videos.insert_one(doc)
-    return {"ok": True}
+    doc["engagement_score"] = (doc["likes"] + 2 * doc["comments"] + 3 * doc["shares"] + 4 * doc["follows"]) / max(doc["views"], 1)
+    result = await db.videos.insert_one(doc)
+    return {"ok": True, "id": str(result.inserted_id)}
 
 
 @router.post("/sources/text")
 async def add_source(source: SourceText):
     db = get_db()
-    await db.sources.insert_one(source.model_dump())
-    return {"ok": True}
+    result = await db.sources.insert_one(source.model_dump())
+    return {"ok": True, "id": str(result.inserted_id)}
 
 
 @router.post("/learning/update/{creator_id}")
@@ -98,7 +99,11 @@ async def update_learning(creator_id: str):
     db = get_db()
     videos = await db.videos.find({"creator_id": creator_id}).sort("engagement_score", -1).limit(5).to_list(5)
     learnings = [f"Prefer topic={v['topic']}, hook={v['hook_type']}, tone={v['tone']}" for v in videos]
-    await db.learning_memory.update_one({"creator_id": creator_id}, {"$set": {"creator_id": creator_id, "learnings": learnings}}, upsert=True)
+    await db.learning_memory.update_one(
+        {"creator_id": creator_id},
+        {"$set": {"creator_id": creator_id, "learnings": learnings}},
+        upsert=True,
+    )
     return {"ok": True, "learnings": learnings}
 
 
@@ -110,7 +115,7 @@ async def generate_script(request: ScriptRequest):
     sources = await db.sources.find({"creator_id": request.creator_id}).sort("_id", -1).limit(5).to_list(5)
     memory = await db.learning_memory.find_one({"creator_id": request.creator_id}) or {"learnings": []}
 
-    context = "\n".join([f"{s.get('title')}: {s.get('content','')[:700]}" for s in sources])
+    context = "\n".join([f"{s.get('title')}: {s.get('content', '')[:700]}" for s in sources])
     prompt = SCRIPT_SYSTEM_PROMPT.format(max_duration_seconds=request.max_duration_seconds) + f"""
 Profile: {profile}
 Last videos: {videos}
@@ -118,9 +123,11 @@ Learned strategy: {memory.get('learnings', [])}
 Source context: {context}
 Generate script for topic={request.topic}, goal={request.goal}, audience={request.audience}, vibe={request.vibe}, platform={request.platform}, source_hint={request.source_hint}
 """
+
     llm = GeminiService()
     script = await llm.generate(prompt)
     critic = await llm.generate(CRITIC_PROMPT + "\n\n" + script)
+
     return {
         "title": f"Script: {request.topic}",
         "estimated_duration_seconds": min(request.max_duration_seconds, 175),
