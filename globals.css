@@ -1,0 +1,75 @@
+from app.core.db import get_db
+from app.schemas.common import ScriptRequest, DirectedScript
+from app.services.gemini_service import GeminiService
+from app.agents.prompts import SCRIPT_SYSTEM_PROMPT, CRITIC_PROMPT
+
+
+def engagement_score(video: dict) -> float:
+    views = max(video.get("views", 0), 1)
+    return round((video.get("likes", 0) + 2 * video.get("comments", 0) + 3 * video.get("shares", 0) + 4 * video.get("follows", 0)) / views, 4)
+
+
+class CreatorPilotWorkflow:
+    def __init__(self):
+        self.llm = GeminiService()
+
+    async def generate_script(self, request: ScriptRequest) -> DirectedScript:
+        db = get_db()
+        profile = await db.creator_profiles.find_one({"creator_id": request.creator_id}) or {}
+        videos = await db.videos.find({"creator_id": request.creator_id}).sort("_id", -1).limit(5).to_list(5)
+        sources = await db.sources.find({"creator_id": request.creator_id}).sort("_id", -1).limit(5).to_list(5)
+        memory = await db.learning_memory.find_one({"creator_id": request.creator_id}) or {"learnings": []}
+
+        video_insights = [
+            {
+                "title": v.get("title"),
+                "topic": v.get("topic"),
+                "hook_type": v.get("hook_type"),
+                "tone": v.get("tone"),
+                "duration_seconds": v.get("duration_seconds"),
+                "engagement_score": engagement_score(v),
+                "notes": v.get("notes", ""),
+            }
+            for v in videos
+        ]
+
+        source_context = "\n\n".join([f"SOURCE: {s.get('title')}\n{s.get('content', '')[:1500]}" for s in sources])
+
+        prompt = SCRIPT_SYSTEM_PROMPT.format(max_duration_seconds=request.max_duration_seconds) + f"""
+
+CREATOR PROFILE:
+{profile}
+
+LAST 5 VIDEO INSIGHTS:
+{video_insights}
+
+SELF-IMPROVEMENT MEMORY:
+{memory.get('learnings', [])}
+
+SOURCE CONTEXT:
+{source_context or 'No source context provided.'}
+
+NEW SCRIPT REQUEST:
+Topic: {request.topic}
+Goal: {request.goal}
+Audience: {request.audience}
+Vibe: {request.vibe}
+Platform: {request.platform}
+Source hint: {request.source_hint}
+"""
+        raw = await self.llm.generate(prompt)
+        critique = await self.llm.generate(CRITIC_PROMPT + "\n\nSCRIPT:\n" + raw)
+
+        # MVP parser: keep robust until final structured output integration.
+        return DirectedScript(
+            title=f"Script: {request.topic}",
+            estimated_duration_seconds=min(request.max_duration_seconds, 165),
+            hook="Generated hook appears in script body. Enable Gemini key for full output.",
+            script=raw,
+            delivery_notes=["Critic notes: " + critique[:500]],
+            b_roll=["Relevant product/source screenshots", "Creator talking head", "Fast pattern-interrupt visual"],
+            captions=["Strong opening caption", "Key claim caption", "CTA caption"],
+            cta="Ask viewers to comment their biggest question or follow for the next part.",
+            why_this_should_work="Uses recent video performance, creator profile, and source context to shape hook, pacing, and CTA.",
+            improvement_memory_used=memory.get("learnings", [])[:5],
+        )

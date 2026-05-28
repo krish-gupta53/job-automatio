@@ -1,0 +1,60 @@
+from pydantic import BaseModel, Field
+from typing import Literal
+
+
+class CreatorProfile(BaseModel):
+    creator_id: str = Field(..., examples=["creator_001"])
+    niche: str
+    target_audience: str
+    brand_voice: str
+    preferred_language: str = "English"
+    platform: Literal["youtube_shorts", "instagram_reels", "tiktok", "linkedin", "other"] = "youtube_shorts"
+    content_rules: list[str] = []
+    taboo_topics: list[str] = []
+
+
+class VideoPerformance(BaseModel):
+    creator_id: str
+    title: str
+    topic: str
+    script: str
+    hook_type: str
+    tone: str
+    duration_seconds: int
+    likes: int = 0
+    comments: int = 0
+    shares: int = 0
+    follows: int = 0
+    views: int = 0
+    notes: str = ""
+
+
+class SourceText(BaseModel):
+    creator_id: str
+    title: str
+    content: str
+    source_type: Literal["manual", "web", "file", "ocr"] = "manual"
+
+
+class ScriptRequest(BaseModel):
+    creator_id: str
+    topic: str
+    goal: str
+    audience: str
+    vibe: str
+    platform: str = "youtube_shorts"
+    max_duration_seconds: int = 180
+    source_hint: str | None = None
+
+
+class DirectedScript(BaseModel):
+    title: str
+    estimated_duration_seconds: int
+    hook: str
+    script: str
+    delivery_notes: list[str]
+    b_roll: list[str]
+    captions: list[str]
+    cta: str
+    why_this_should_work: str
+    improvement_memory_used: list[str]
